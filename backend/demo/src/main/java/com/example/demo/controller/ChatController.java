@@ -3,7 +3,10 @@ package com.example.demo.controller;
 import com.example.demo.dto.ApiResponse;
 import com.example.demo.dto.ChatRequest;
 import com.example.demo.dto.ChatResponse;
+import com.example.demo.model.User;
+import com.example.demo.repository.UserRepository;
 import com.example.demo.service.ChatService;
+import com.example.demo.service.OpenAIService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -19,6 +22,8 @@ import java.util.List;
 public class ChatController {
 
     private final ChatService chatService;
+    private final OpenAIService openAIService;
+    private final UserRepository userRepository;  // Add this line
 
     @PostMapping("/send")
     public ResponseEntity<ApiResponse<ChatResponse>> sendMessage(
@@ -67,6 +72,22 @@ public class ChatController {
             String email = authentication.getName();
             chatService.deleteChat(chatId, email);
             return ResponseEntity.ok(ApiResponse.success(null));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest()
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    @PostMapping("/clear-context")
+    public ResponseEntity<ApiResponse<String>> clearConversationContext(
+            Authentication authentication) {
+        try {
+            User user = userRepository.findByEmail(authentication.getName())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            openAIService.clearConversationHistory(user.getId().toString());
+
+            return ResponseEntity.ok(ApiResponse.success("Conversation context cleared successfully"));
         } catch (Exception e) {
             return ResponseEntity.badRequest()
                     .body(ApiResponse.error(e.getMessage()));

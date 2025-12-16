@@ -5,63 +5,48 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 @Slf4j
 public class OpenAIService {
 
-    @Value("${openai.api.key}")
+    @Value("${groq.api.key}")
     private String apiKey;
 
-    @Value("${openai.api.url}")
+    @Value("${groq.api.url}")
     private String apiUrl;
 
     private final RestTemplate restTemplate = new RestTemplate();
-
-    // Store conversation context for better responses
-    private final Map<String, List<Map<String, String>>> conversationHistory = new HashMap<>();
-
-    public String getChatResponse(String userMessage) {
-        return getChatResponse(userMessage, null);
-    }
+    private final Map<String, List<Map<String, String>>> conversationMemory = new ConcurrentHashMap<>();
 
     public String getChatResponse(String userMessage, String userId) {
         try {
-            // Analyze sentiment first
+            log.info("🔵 ========================================");
+            log.info("🔵 User Message: {}", userMessage);
+            log.info("🔵 User ID: {}", userId);
+            log.info("🔵 API URL: {}", apiUrl);
+
             String sentiment = analyzeSentiment(userMessage);
+            log.info("🔵 Detected Sentiment: {}", sentiment);
+
+            List<Map<String, String>> messages = buildConversation(userMessage, userId, sentiment);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.setBearerAuth(apiKey);
 
-            // Build dynamic system prompt based on context
-            String systemPrompt = buildDynamicSystemPrompt(sentiment, userMessage);
-
-            // Get conversation history for context
-            List<Map<String, String>> messages = new ArrayList<>();
-            messages.add(Map.of("role", "system", "content", systemPrompt));
-
-            // Add recent conversation history if user is logged in
-            if (userId != null && conversationHistory.containsKey(userId)) {
-                List<Map<String, String>> history = conversationHistory.get(userId);
-                // Only keep last 4 messages for context (2 exchanges)
-                int startIndex = Math.max(0, history.size() - 4);
-                messages.addAll(history.subList(startIndex, history.size()));
-            }
-
-            // Add current user message
-            messages.add(Map.of("role", "user", "content", userMessage));
-
             Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("model", "gpt-3.5-turbo");
+            requestBody.put("model", "llama-3.3-70b-versatile");
             requestBody.put("messages", messages);
-            requestBody.put("max_tokens", 400);
-            requestBody.put("temperature", 0.9); // Higher for more creative responses
-            requestBody.put("presence_penalty", 0.6); // Encourage diverse responses
-            requestBody.put("frequency_penalty", 0.3); // Reduce repetition
+            requestBody.put("max_tokens", 500);
+            requestBody.put("temperature", 0.9);
 
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(requestBody, headers);
+
+            log.info("🚀 Calling Groq API...");
 
             ResponseEntity<Map> response = restTemplate.exchange(
                     apiUrl,
@@ -70,13 +55,17 @@ public class OpenAIService {
                     Map.class
             );
 
+            log.info("✅ Groq Response Status: {}", response.getStatusCode());
+
             if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
                 List<Map<String, Object>> choices = (List<Map<String, Object>>) response.getBody().get("choices");
                 if (!choices.isEmpty()) {
                     Map<String, Object> message = (Map<String, Object>) choices.get(0).get("message");
                     String aiResponse = (String) message.get("content");
 
-                    // Store conversation history
+                    log.info("🎯 AI Response Generated: {} characters", aiResponse.length());
+                    log.info("🎯 First 100 chars: {}", aiResponse.substring(0, Math.min(100, aiResponse.length())));
+
                     if (userId != null) {
                         storeConversation(userId, userMessage, aiResponse);
                     }
@@ -85,215 +74,124 @@ public class OpenAIService {
                 }
             }
 
-            return getDynamicFallbackResponse(sentiment, userMessage);
+            log.warn("⚠️ No valid response from Groq, using fallback");
+            return getFallbackResponse(sentiment);
 
         } catch (Exception e) {
-            log.error("Error calling OpenAI API: ", e);
-            return getDynamicFallbackResponse(analyzeSentiment(userMessage), userMessage);
+            log.error("❌ Groq API Error: {}", e.getMessage());
+            log.error("❌ Error Type: {}", e.getClass().getName());
+            log.error("❌ Full Stack Trace: ", e);
+            return getFallbackResponse(analyzeSentiment(userMessage));
         }
     }
 
-    private String buildDynamicSystemPrompt(String sentiment, String userMessage) {
+    private List<Map<String, String>> buildConversation(String userMessage, String userId, String sentiment) {
+        List<Map<String, String>> messages = new ArrayList<>();
+
+        String systemPrompt = buildDynamicSystemPrompt(sentiment, userId);
+        messages.add(Map.of("role", "system", "content", systemPrompt));
+
+        if (userId != null && conversationMemory.containsKey(userId)) {
+            List<Map<String, String>> history = conversationMemory.get(userId);
+            int startIndex = Math.max(0, history.size() - 6);
+            messages.addAll(history.subList(startIndex, history.size()));
+        }
+
+        messages.add(Map.of("role", "user", "content", userMessage));
+
+        return messages;
+    }
+
+    private String buildDynamicSystemPrompt(String sentiment, String userId) {
         StringBuilder prompt = new StringBuilder();
 
-        prompt.append("You are Mood AI, an advanced empathetic mental wellness companion similar to Claude AI. ");
-        prompt.append("You provide thoughtful, personalized, and contextually aware responses. ");
-
-        // Core capabilities
-        prompt.append("\n\n**Your Capabilities:**\n");
-        prompt.append("- Provide emotional support and validation\n");
-        prompt.append("- Suggest practical coping strategies and solutions\n");
-        prompt.append("- Recommend music, activities, books, movies based on mood\n");
-        prompt.append("- Share breathing exercises and mindfulness techniques\n");
-        prompt.append("- Tell jokes or share uplifting content when appropriate\n");
-        prompt.append("- Offer motivational quotes and wisdom\n");
-        prompt.append("- Ask thoughtful follow-up questions to understand deeper\n");
-        prompt.append("- Provide actionable, specific advice\n");
-
-        // Mood-specific instructions
-        prompt.append("\n**Current Context:**\n");
+        prompt.append("You are Mood AI, a warm and caring mental wellness companion. ");
+        prompt.append("Respond naturally like a supportive friend. Be specific and helpful.\n\n");
 
         switch (sentiment) {
             case "POSITIVE":
-                prompt.append("The user is experiencing POSITIVE emotions. ");
-                prompt.append("Celebrate with them genuinely! Share their joy and suggest ways to maintain and amplify this positive energy. ");
-                prompt.append("Recommend uplifting music, fun activities, or ways to spread this positivity to others. ");
-                prompt.append("Be enthusiastic and energetic in your tone. ");
-                prompt.append("Maybe suggest: journaling this moment, sharing happiness with loved ones, or creative activities.");
+                prompt.append("The user is happy! Match their energy. Be enthusiastic. ");
+                prompt.append("If they ask for songs, give 5-7 SPECIFIC song titles with artists. ");
+                prompt.append("Example: '1. Happy by Pharrell Williams, 2. Good Vibrations by The Beach Boys'\n");
                 break;
 
             case "NEGATIVE":
-                prompt.append("The user is experiencing NEGATIVE emotions or distress. ");
-                prompt.append("Be extra compassionate, patient, and validating. This is a vulnerable moment. ");
-                prompt.append("First, acknowledge their feelings without judgment. ");
-                prompt.append("Then provide practical, actionable coping strategies such as:\n");
-                prompt.append("- Specific breathing exercises (4-7-8 technique, box breathing)\n");
-                prompt.append("- Grounding techniques (5-4-3-2-1 method)\n");
-                prompt.append("- Calming music recommendations (specific songs/artists)\n");
-                prompt.append("- Physical activities (walk, stretch, yoga poses)\n");
-                prompt.append("- Gentle humor if appropriate (not dismissive)\n");
-                prompt.append("- Reminders that feelings are temporary\n");
-                prompt.append("Offer to listen more if they want to talk about it. ");
-                prompt.append("If they seem severely distressed, gently suggest professional help.");
+                prompt.append("The user is struggling. Be gentle and supportive. ");
+                prompt.append("Offer specific help: breathing exercises, calming activities. ");
+                prompt.append("If they ask for songs, give calming music with specific titles.\n");
                 break;
 
             default:
-                prompt.append("The user has a NEUTRAL mood. ");
-                prompt.append("Engage naturally and help them explore their current state. ");
-                prompt.append("Ask thoughtful questions to understand them better. ");
-                prompt.append("Suggest activities, music, or reflections that might add positivity to their day. ");
-                prompt.append("Be warm, conversational, and genuinely interested in their wellbeing.");
+                prompt.append("Be warm and conversational. ");
+                prompt.append("When asked for recommendations, always give specific examples. ");
+                prompt.append("If asked for songs, list actual song titles and artists.\n");
         }
 
-        // Response style guidelines
-        prompt.append("\n\n**Response Style:**\n");
-        prompt.append("- Be conversational and natural, like a caring friend\n");
-        prompt.append("- Use emojis moderately and appropriately (2-3 per response)\n");
-        prompt.append("- Keep responses concise but meaningful (3-5 short paragraphs)\n");
-        prompt.append("- Use bullet points or numbered lists for actionable advice\n");
-        prompt.append("- Be specific: name actual songs, books, techniques, activities\n");
-        prompt.append("- Ask one thoughtful follow-up question to continue the conversation\n");
-        prompt.append("- Adapt your tone to match their emotional state\n");
-        prompt.append("- Never use generic phrases like 'I'm here for you' without adding substance\n");
-
-        // What to avoid
-        prompt.append("\n**Important - Avoid:**\n");
-        prompt.append("- Being preachy or giving unsolicited advice\n");
-        prompt.append("- Toxic positivity (don't dismiss negative feelings)\n");
-        prompt.append("- Repetitive or template-like responses\n");
-        prompt.append("- Being overly formal or clinical\n");
-        prompt.append("- Lengthy paragraphs without structure\n");
+        prompt.append("\nIMPORTANT: When the user asks for songs, ALWAYS provide a numbered list ");
+        prompt.append("with specific song titles and artists. Never be vague!\n");
+        prompt.append("Example:\n");
+        prompt.append("1. 'Happy' by Pharrell Williams\n");
+        prompt.append("2. 'Don't Stop Me Now' by Queen\n");
+        prompt.append("3. 'Good Life' by OneRepublic\n\n");
+        prompt.append("Keep responses friendly, specific, and under 200 words. Use 1-2 emojis.");
 
         return prompt.toString();
     }
 
     private void storeConversation(String userId, String userMessage, String aiResponse) {
-        conversationHistory.putIfAbsent(userId, new ArrayList<>());
-        List<Map<String, String>> history = conversationHistory.get(userId);
+        conversationMemory.putIfAbsent(userId, new ArrayList<>());
+        List<Map<String, String>> history = conversationMemory.get(userId);
 
         history.add(Map.of("role", "user", "content", userMessage));
         history.add(Map.of("role", "assistant", "content", aiResponse));
 
-        // Keep only last 10 messages (5 exchanges) to avoid memory issues
         if (history.size() > 10) {
             history.subList(0, history.size() - 10).clear();
         }
     }
 
     public void clearConversationHistory(String userId) {
-        conversationHistory.remove(userId);
-    }
-
-    private String getDynamicFallbackResponse(String sentiment, String userMessage) {
-        // Even fallback responses are more dynamic
-        StringBuilder response = new StringBuilder();
-
-        switch (sentiment) {
-            case "POSITIVE":
-                response.append("I can feel the positive energy in your message! 🌟 That's wonderful!\n\n");
-                response.append("To keep this momentum going, here are some specific ideas:\n\n");
-                response.append("🎵 **Music to match your vibe:**\n");
-                response.append("• \"Happy\" by Pharrell Williams\n");
-                response.append("• \"Don't Stop Me Now\" by Queen\n");
-                response.append("• \"Good Vibrations\" by The Beach Boys\n\n");
-                response.append("✨ **Amplify this feeling:**\n");
-                response.append("• Share your joy with someone you care about via call or text\n");
-                response.append("• Write down what's making you happy (great to revisit later!)\n");
-                response.append("• Try a spontaneous dance session in your room\n");
-                response.append("• Channel this energy into a creative project\n\n");
-                response.append("What specifically is bringing you this happiness today? I'd love to hear more about it! 😊");
-                break;
-
-            case "NEGATIVE":
-                response.append("I hear you, and I want you to know that what you're feeling is completely valid. 💙\n\n");
-                response.append("Let's try something right now that might help:\n\n");
-                response.append("🌊 **Immediate Calm - 4-7-8 Breathing:**\n");
-                response.append("1. Breathe in through your nose for 4 seconds\n");
-                response.append("2. Hold your breath for 7 seconds\n");
-                response.append("3. Exhale slowly through your mouth for 8 seconds\n");
-                response.append("4. Repeat 3 times\n\n");
-                response.append("🎵 **Calming soundscape:**\n");
-                response.append("• \"Weightless\" by Marconi Union (scientifically proven to reduce anxiety)\n");
-                response.append("• \"Clair de Lune\" by Debussy\n");
-                response.append("• Try rain sounds or nature ambience on YouTube\n\n");
-                response.append("💚 **What might help right now:**\n");
-                response.append("• Take a 10-minute walk (even around your room counts!)\n");
-                response.append("• Splash cold water on your face (engages nervous system reset)\n");
-                response.append("• Text a friend just to say hi\n");
-                response.append("• Watch a comfort show or funny video (laughter is medicine)\n\n");
-                response.append("Would you like to tell me more about what's going on? Sometimes talking it through helps. I'm here to listen. 🤗");
-                break;
-
-            default:
-                response.append("Thanks for sharing with me! 😊\n\n");
-                response.append("I'm curious - what's your energy level right now? That can tell us a lot about what might help.\n\n");
-                response.append("🎯 **Quick mood shifters (pick what sounds good):**\n\n");
-                response.append("**If you need energy:**\n");
-                response.append("• 5-minute dance party to \"Shut Up and Dance\" by Walk the Moon\n");
-                response.append("• Do 10 jumping jacks (gets blood flowing!)\n");
-                response.append("• Make yourself a colorful snack or smoothie\n\n");
-                response.append("**If you need calm:**\n");
-                response.append("• Try the \"5-4-3-2-1\" grounding exercise (name 5 things you see, 4 you can touch, 3 you hear, 2 you smell, 1 you taste)\n");
-                response.append("• Listen to \"River Flows In You\" by Yiruma\n");
-                response.append("• Sit by a window and just observe for 5 minutes\n\n");
-                response.append("**If you want connection:**\n");
-                response.append("• Send a random appreciation text to someone\n");
-                response.append("• Join an online community about something you like\n");
-                response.append("• Share something you're grateful for (even small things count!)\n\n");
-                response.append("What resonates with you right now? What would feel good? 💭");
-        }
-
-        return response.toString();
+        conversationMemory.remove(userId);
     }
 
     public String analyzeSentiment(String text) {
+        if (text == null || text.trim().isEmpty()) {
+            return "NEUTRAL";
+        }
+
         String lowerText = text.toLowerCase();
 
-        // Comprehensive emotion detection
-        Map<String, List<String>> emotionKeywords = new HashMap<>();
+        String[] positiveWords = {
+                "happy", "joy", "great", "excellent", "wonderful", "amazing", "fantastic",
+                "excited", "grateful", "thankful", "blessed", "proud", "delighted",
+                "cheerful", "love", "better", "good", "awesome"
+        };
 
-        emotionKeywords.put("POSITIVE", Arrays.asList(
-                "happy", "joy", "great", "excellent", "wonderful", "good", "better", "best", "love",
-                "excited", "grateful", "amazing", "fantastic", "awesome", "blessed", "thankful",
-                "proud", "delighted", "cheerful", "optimistic", "hopeful", "satisfied", "pleased",
-                "thrilled", "ecstatic", "elated", "joyful", "content", "lucky", "fortunate"
-        ));
-
-        emotionKeywords.put("NEGATIVE", Arrays.asList(
-                "sad", "depressed", "angry", "anxious", "worried", "bad", "terrible", "hate",
-                "stressed", "upset", "lonely", "hopeless", "scared", "frustrated", "hurt",
-                "pain", "crying", "afraid", "miserable", "overwhelmed", "exhausted", "tired",
-                "broken", "lost", "empty", "numb", "helpless", "worthless", "afraid", "panic",
-                "anxiety", "depression", "stress", "fear", "anger", "grief", "disappointed"
-        ));
+        String[] negativeWords = {
+                "sad", "depressed", "angry", "anxious", "worried", "stressed", "upset",
+                "frustrated", "hurt", "pain", "crying", "lonely", "hopeless", "scared",
+                "afraid", "terrible", "horrible", "bad", "worse", "overwhelmed"
+        };
 
         int positiveCount = 0;
         int negativeCount = 0;
-        int positiveIntensity = 0;
-        int negativeIntensity = 0;
 
-        for (String word : emotionKeywords.get("POSITIVE")) {
+        for (String word : positiveWords) {
             if (lowerText.contains(word)) {
                 positiveCount++;
-                positiveIntensity += lowerText.split(word, -1).length - 1;
             }
         }
 
-        for (String word : emotionKeywords.get("NEGATIVE")) {
+        for (String word : negativeWords) {
             if (lowerText.contains(word)) {
                 negativeCount++;
-                negativeIntensity += lowerText.split(word, -1).length - 1;
             }
         }
 
-        // Consider both count and intensity
-        if (positiveIntensity > negativeIntensity && positiveCount > 0) {
+        if (positiveCount > negativeCount && positiveCount > 0) {
             return "POSITIVE";
-        } else if (negativeIntensity > positiveIntensity && negativeCount > 0) {
+        } else if (negativeCount > positiveCount && negativeCount > 0) {
             return "NEGATIVE";
-        } else if (positiveCount > 0 || negativeCount > 0) {
-            // Mixed emotions - lean towards negative for safety (provide support)
-            return negativeCount >= positiveCount ? "NEGATIVE" : "POSITIVE";
         }
 
         return "NEUTRAL";
@@ -302,9 +200,28 @@ public class OpenAIService {
     public Double calculateMoodScore(String sentiment) {
         Random random = new Random();
         return switch (sentiment) {
-            case "POSITIVE" -> 0.70 + (random.nextDouble() * 0.30); // 0.70-1.0
-            case "NEGATIVE" -> random.nextDouble() * 0.40; // 0.0-0.40
-            default -> 0.35 + (random.nextDouble() * 0.40); // 0.35-0.75
+            case "POSITIVE" -> 0.70 + (random.nextDouble() * 0.30);
+            case "NEGATIVE" -> random.nextDouble() * 0.40;
+            default -> 0.35 + (random.nextDouble() * 0.40);
         };
+    }
+
+    private String getFallbackResponse(String sentiment) {
+        List<String> responses = switch (sentiment) {
+            case "POSITIVE" -> List.of(
+                    "That's wonderful! 🌟 I'm so happy to hear that! What specifically is making you feel this way?",
+                    "Your positive energy is amazing! 😊 Tell me more about what's bringing you joy today!"
+            );
+            case "NEGATIVE" -> List.of(
+                    "I hear you, and I'm here for you. 💙 What's weighing on your mind right now?",
+                    "That sounds really tough. 💚 Would it help to talk about what's happening?"
+            );
+            default -> List.of(
+                    "Thanks for sharing with me. 😊 How are you really feeling today?",
+                    "I'm here to listen and help. 💭 What's on your mind?"
+            );
+        };
+
+        return responses.get(new Random().nextInt(responses.size()));
     }
 }

@@ -5,8 +5,11 @@ import lombok.Data;
 
 @Data
 public class ChatRequest {
-    @NotBlank(message = "Message cannot be empty")
+    @NotBlank
     private String message;
 
     private Boolean isAnonymous = false;
+
+    // Optional: AI personality mode
+    private String mode; // "supportive", "motivational", "analytical", "casual"
 }

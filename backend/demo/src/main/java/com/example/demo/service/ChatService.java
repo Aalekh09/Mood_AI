@@ -28,10 +28,10 @@ public class ChatService {
         User user = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
-        // Pass userId to maintain conversation context
+        // Pass user ID for conversation context
         String aiResponse = openAIService.getChatResponse(
                 request.getMessage(),
-                user.getId().toString()  // Add this line
+                user.getId().toString()  // Important: Pass user ID
         );
 
         String sentiment = openAIService.analyzeSentiment(request.getMessage());
@@ -49,11 +49,10 @@ public class ChatService {
 
         return mapToChatResponse(savedChat);
     }
-
     @Transactional
     public ChatResponse sendAnonymousMessage(ChatRequest request) {
-        // Get AI response
-        String aiResponse = openAIService.getChatResponse(request.getMessage());
+        // Get AI response (pass null for anonymous users - no conversation memory)
+        String aiResponse = openAIService.getChatResponse(request.getMessage(), null);  // ✅ FIXED
 
         // Analyze sentiment
         String sentiment = openAIService.analyzeSentiment(request.getMessage());
